@@ -1,0 +1,175 @@
+<netpdl name="NetPDL custom protocol" description="NetPDL custom protocol">
+<protocol name="pppoeschema" longname="pppoe handler" prevproto="pppoe">
+     <execute-code>
+      <before>
+        <if expr="($FW[48:16]) == 0xc021">
+          <if-false>
+            <!--NIA of 0048XXXX indicates key gen, in key gen , action code 2 indicates CC ENABLE which overwrites CCBASE in internal context -->
+            <assign-variable name="$hpnia" value="0x00480200"/>
+            <assign-variable name="$nia"   value="0x00480200"/>
+            <!--NOTE: this ccbase +0x30 is corresponding pppoe relay table -->
+            <!-- this pppoe relay table is allocated dynamically by FMC while pushing tables from cdx_pcd.xml -->
+            <!-- If any new table gets added ccbase value of ppoe relay table should be checked and updated accordingly -->
+            <assign-variable name="$ccbase" value="$ccbase + 0x30"/>
+            <!--indicate we came into cc from pppoe schema-->
+            <assign-variable name="$shimr" value="0x40"/>
+            <action type="exit" confirm="yes" nextproto="end_parse"/>
+          </if-false>
+          <if-true>
+            <assign-variable name="$hpnia" value="0x500002"/>
+            <assign-variable name="$nia" value="0x500002"/>
+            <action type="exit" confirm="yes" nextproto="end_parse"/>
+          </if-true>
+        </if>
+     </before>
+     </execute-code>
+</protocol>
+ <protocol name="ethernetschema" longname="offline port Ethernet correction" prevproto="ethernet">
+    <execute-code>
+      <before>
+        <if expr="($logicalportid == 9) and (ethernet.type == 0x0800 or ethernet.type == 0x86dd)">
+	  <if-true>
+            <if expr="($FW[112:8] bitwand 0xF0) == 0x40">
+              <if-true>
+                    <nextproto proto="#ip4"/>
+                    <action type="exit" confirm="no" nextproto="ipv4"/>
+              </if-true>
+            </if> 
+            <if expr="($FW[112:8] bitwand 0xF0) == 0x60">
+              <if-true>
+                    <nextproto proto="#ip6"/>
+                    <action type="exit" confirm="no" nextproto="ipv6"/>
+              </if-true>
+            </if> 
+          </if-true>
+        </if>
+        <action type="exit" nextproto="return"/>
+      </before>
+    </execute-code>
+ </protocol>
+ <protocol name="ipv4schema" longname="ipv4schema" prevproto="ipv4">
+    <execute-code>
+      <before>
+	 <!-- If it is a multicast packet stop parsing -->
+        <if expr="$l2r bitwand 0x0060 == 0x0040">
+          <if-true>
+            <action type="exit" confirm="yes" nextproto="end_parse"/>
+          </if-true>
+        </if>
+	<!-- drop packets with invalid ttl value -->
+        <if expr="ipv4.ttl == 1 or ipv4.ttl == 0">
+          <if-true>
+            <assign-variable name="$hpnia" value="0x500002"/>
+            <action type="exit" confirm="no" nextproto="end_parse"/>
+          </if-true>
+        </if>
+	<!-- If it's a fragment then move to ipfrag scheme, needs sync with pcd
+file for scheme id -->
+        <if expr="(ipv4.mf != 0) or (ipv4.foffset != 0) ">
+          <if-true>
+            <!-- reassemble only tcp/udp/esp/ipv6 tunneled pkts -->
+            <if expr="(ipv4.nextp == 6) or (ipv4.nextp == 17) or (ipv4.nextp ==
+50) or (ipv4.nextp == 41)" >
+              <if-true>
+                <!-- change scheme only for other than first fragment -->
+                <if expr="(ipv4.foffset != 0)" >
+                  <if-true>
+                    <!-- update var to mark that the packet needs reassly -->
+                    <assign-variable name="$shimr" value="0x80"/>
+                  </if-true>
+                  <if-false>
+                    <assign-variable name="$shimr" value="0x81"/>
+                  </if-false>
+                </if>
+              </if-true>
+              <if-false>
+                <!-- update variable to mark that the packet does not need reass
+ly -->
+                <assign-variable name="$shimr" value="0"/>
+              </if-false>
+            </if>
+          </if-true>
+          <if-false>
+            <!-- update variable to mark that the packet does not need reassly -->
+            <assign-variable name="$shimr" value="0"/>
+          </if-false>
+        </if>
+	<!-- If next protocol is ipv6 change protocol -->
+        <if expr="ipv4.nextp == 0x29">
+          <if-true>
+            <action type="exit" confirm="no" nextproto="ipv6"/>
+          </if-true>
+        </if>
+      </before>
+    </execute-code>
+  </protocol> 
+ <protocol name="ipv6schema" longname="ipv6schema" prevproto="ipv6">
+    <execute-code>
+      <before>
+	<if expr="ipv6.hop == 1 or ipv6.hop == 0">
+          <if-true>
+            <assign-variable name="$hpnia" value="0x500002"/>
+            <action type="exit" confirm="no" nextproto="end_parse"/>
+          </if-true>
+        </if>
+        <if expr="$l2r bitwand 0x0060 == 0x0040">
+	  <if-true>
+            <action type="exit" confirm="yes" nextproto="end_parse"/>
+          </if-true>
+        </if>
+        <if expr="(($l3r bitwand 0x0040) != 0)">
+          <if-true>
+            <!-- If there is a fragment extension header (indicated in bit 9 of L3R) then mark in shimr-->
+            <assign-variable name="$shimr" value="0x80"/>
+          </if-true>         
+          <if-false>
+            <!-- update variable to mark that the packet does not need reassly -->
+            <assign-variable name="$shimr" value="0"/>
+          </if-false>
+        </if>
+      </before>
+    </execute-code>
+  </protocol> 
+  <protocol name="udpschema" longname="udpschema"  prevproto="udp">
+    <execute-code>
+      <before>
+        <if expr="$ipoffset_1 == $ipoffset_n">
+          <if-true>
+                <if expr="$l3r bitwand 0x8000 == 0x8000">
+                  <if-true>
+                    <assign-variable name="$l3r" value="$l3r bitwor 0x800"/>
+                  </if-true>
+                  <if-false>
+                    <assign-variable name="$l3r" value="$l3r bitwor 0x400"/>
+                  </if-false>
+                </if>
+          </if-true>
+        </if>
+       </before>
+    </execute-code>
+  </protocol>
+  <protocol name="tcpschema" longname="tcpschema"  prevproto="tcp">
+    <execute-code>
+      <before>
+	 <if expr="((tcp.flags bitwand 7) != 0)">
+          <if-true>
+            <assign-variable name="$hpnia" value="0x500002"/>
+            <action type="exit" confirm="no" nextproto="end_parse"/>
+          </if-true>
+        </if>
+        <if expr="$ipoffset_1 == $ipoffset_n">
+          <if-true>
+                <if expr="$l3r bitwand 0x8000 == 0x8000">
+                  <if-true>
+                    <assign-variable name="$l3r" value="$l3r bitwor 0x800"/>
+                  </if-true>
+                  <if-false>
+                    <assign-variable name="$l3r" value="$l3r bitwor 0x400"/>
+                  </if-false>
+                </if>
+          </if-true>
+        </if>
+       </before>
+    </execute-code>
+  </protocol>
+</netpdl>
